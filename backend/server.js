@@ -16,6 +16,14 @@ const port = 5000;
 app.use(cors());
 app.use(express.json());
 
+// Root path handler to confirm API status
+app.get('/', (req, res) => {
+    res.json({
+        status: "online",
+        message: "Smart Desktop Monitoring Backend API is running."
+    });
+});
+
 // MySQL connection (uses env URL for cloud, fallback to local credentials)
 const connectionConfig = process.env.DATABASE_URL || {
     host: process.env.DB_HOST || 'localhost',
