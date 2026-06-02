@@ -152,7 +152,7 @@ const db = {
 
 mysqlConnection.connect((err) => {
     if (err) {
-        console.error('MySQL connection failed. Falling back to local JSON database (users.json). Error:', err.message);
+        console.log('MySQL connection not configured or offline. Running with local JSON database fallback (users.json).');
         useLocalFallback = true;
     } else {
         console.log('Connected to MySQL database');
