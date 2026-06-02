@@ -24,6 +24,111 @@ app.get('/', (req, res) => {
     });
 });
 
+// Local JSON database fallback configuration
+const USERS_FILE = path.join(__dirname, 'users.json');
+if (!fs.existsSync(USERS_FILE)) {
+    fs.writeFileSync(USERS_FILE, JSON.stringify([]));
+}
+
+function getLocalUsers() {
+    try {
+        if (!fs.existsSync(USERS_FILE)) return [];
+        return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+    } catch (e) {
+        return [];
+    }
+}
+
+function saveLocalUsers(users) {
+    try {
+        fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+    } catch (e) {
+        console.error('Error saving local users:', e);
+    }
+}
+
+const localDb = {
+    query: (sql, params, callback) => {
+        if (typeof params === 'function') {
+            callback = params;
+            params = [];
+        }
+        
+        const cleanSql = sql.trim().replace(/\s+/g, ' ');
+        
+        if (cleanSql.startsWith('CREATE TABLE') || cleanSql.startsWith('ALTER TABLE')) {
+            if (callback) callback(null);
+            return;
+        }
+        
+        if (cleanSql.startsWith('SELECT * FROM users ORDER BY last_active DESC')) {
+            const users = getLocalUsers();
+            users.sort((a, b) => new Date(b.last_active || 0) - new Date(a.last_active || 0));
+            if (callback) callback(null, users);
+            return;
+        }
+        
+        if (cleanSql.startsWith('SELECT * FROM users WHERE username = ? AND machine_name = ?')) {
+            const users = getLocalUsers();
+            const [username, machineName] = params;
+            const filtered = users.filter(u => u.username === username && u.machine_name === machineName);
+            if (callback) callback(null, filtered);
+            return;
+        }
+        
+        if (cleanSql.includes('UPDATE users SET')) {
+            const users = getLocalUsers();
+            let updated = false;
+            if (params.length === 4) {
+                const [osName, locationString, username, machineName] = params;
+                for (let u of users) {
+                    if (u.username === username && u.machine_name === machineName) {
+                        u.status = 'Active';
+                        u.os_name = osName;
+                        u.location = locationString;
+                        u.last_active = new Date().toISOString();
+                        updated = true;
+                    }
+                }
+            } else if (params.length === 2) {
+                const [username, machineName] = params;
+                for (let u of users) {
+                    if (u.username === username && u.machine_name === machineName) {
+                        u.status = 'Active';
+                        u.last_active = new Date().toISOString();
+                        updated = true;
+                    }
+                }
+            }
+            if (updated) {
+                saveLocalUsers(users);
+            }
+            if (callback) callback(null);
+            return;
+        }
+        
+        if (cleanSql.startsWith('INSERT INTO users')) {
+            const [username, machineName, osName, locationString] = params;
+            const users = getLocalUsers();
+            const newUser = {
+                id: users.length + 1,
+                username,
+                machine_name: machineName,
+                status: 'Active',
+                os_name: osName,
+                location: locationString,
+                last_active: new Date().toISOString()
+            };
+            users.push(newUser);
+            saveLocalUsers(users);
+            if (callback) callback(null);
+            return;
+        }
+        
+        if (callback) callback(new Error('Unsupported query in fallback database'));
+    }
+};
+
 // MySQL connection (uses env URL for cloud, fallback to local credentials)
 const connectionConfig = process.env.DATABASE_URL || {
     host: process.env.DB_HOST || 'localhost',
@@ -32,14 +137,25 @@ const connectionConfig = process.env.DATABASE_URL || {
     database: process.env.DB_NAME || 'desktop_monitor'
 };
 
-const db = mysql.createConnection(connectionConfig);
+const mysqlConnection = mysql.createConnection(connectionConfig);
+let useLocalFallback = false;
 
-db.connect((err) => {
+const db = {
+    query: (...args) => {
+        if (useLocalFallback) {
+            localDb.query(...args);
+        } else {
+            mysqlConnection.query(...args);
+        }
+    }
+};
+
+mysqlConnection.connect((err) => {
     if (err) {
-        console.error('Error connecting to MySQL database:', err);
+        console.error('MySQL connection failed. Falling back to local JSON database (users.json). Error:', err.message);
+        useLocalFallback = true;
     } else {
         console.log('Connected to MySQL database');
-        // Ensure users table and columns exist
         const createTable = `
             CREATE TABLE IF NOT EXISTS users (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -48,13 +164,11 @@ db.connect((err) => {
                 status VARCHAR(50)
             )
         `;
-        db.query(createTable, (err) => {
+        mysqlConnection.query(createTable, (err) => {
             if (err) console.error('Error creating users table:', err);
-            
-            // Add new columns if they do not exist
-            db.query("ALTER TABLE users ADD COLUMN os_name VARCHAR(255)", () => {});
-            db.query("ALTER TABLE users ADD COLUMN location VARCHAR(255)", () => {});
-            db.query("ALTER TABLE users ADD COLUMN last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP", () => {});
+            mysqlConnection.query("ALTER TABLE users ADD COLUMN os_name VARCHAR(255)", () => {});
+            mysqlConnection.query("ALTER TABLE users ADD COLUMN location VARCHAR(255)", () => {});
+            mysqlConnection.query("ALTER TABLE users ADD COLUMN last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP", () => {});
         });
     }
 });
